@@ -511,3 +511,93 @@ class CustomIOSDriver(IOSDriver):
             elif "Room:" == split_line[0]:
                 return_vars["room"] = split_line[1]
         return return_vars
+
+
+
+    def get_netflow(self):
+        flow = {
+            "enabled": None,
+            "supported": None,
+            "version": None,
+            "timeout-active": None,
+            "timeout-inactive": None,
+            "interfaces": [],
+            "destinations": []
+        }
+
+        re_enabled = re.compile(r'^.* export (?P<VERSION>v[0-9]) is (?P<STATE>enabled|disabled) .*')
+        re_src = re.compile(r'^.*Source\((?P<INDEX>[0-9]+)\) +(?P<SRCIP>[^ ]+) \((?P<SRCINT>.*)\).*')
+        re_dest = re.compile(r'^.*Destination\((?P<INDEX>[0-9]+)\) +(?P<DSTIP>[^ ]+) \((?P<DSTPORT>[0-9]+)\).*')
+
+        result, error = self._send_cli("show ip flow interface")
+        if not error:
+            flow["supported"] = True
+            if result:
+                flow["enabled"] = True
+            intf = None
+            for l in result.splitlines():
+                if l and not l.startswith(" "):
+                    if intf:
+                        flow["interfaces"].append(intf)
+                    intf = { "interface": l, "ingress": False, "egress": False }
+                elif l and l.startswith(" "):
+                    if intf:
+                        if "ingress" in l:
+                            intf["ingress"] = True
+                        elif "egress" in l:
+                            intf["egress"] = True
+            if intf:
+                flow["interfaces"].append(intf)
+
+
+        result, error = self._send_cli("show ip cache flow")
+        if not error:
+            for l in result.splitlines():
+                if "Active flows timeout" in l:
+                    flow["timeout-active"] = l.split(" ")[-2]
+                elif "Inactive flows timeout" in l:
+                    flow["timeout-inactive"] = l.split(" ")[-2]
+
+
+        result, error = self._send_cli("show ip flow export")
+        if not error:
+            destinations = []
+            vrf = None
+            for l in result.splitlines():
+                if l and not l.startswith(" "):
+                    m = re_enabled.match(l)
+                    if m:
+                        flow["enabled"] = True if m.groupdict()["STATE"] == "enabled" else False
+                        flow["version"] = m.groupdict()["VERSION"]
+                        continue
+                if l and "VRF ID" in l:
+                    vrf = l.split(" ")[-1]
+                    continue
+                if l and "Source" in l:
+                    m = re_src.match(l)
+                    if m:
+                        d = { "index": m.groupdict()["INDEX"],
+                              "srcip": m.groupdict()["SRCIP"],
+                              "srcint": m.groupdict()["SRCINT"],
+                              "vrf": vrf,
+                              "dstip": None,
+                              "dstport": None
+                            }
+                        destinations.append(d)
+                    continue
+                if l and "Destination" in l:
+                    m = re_dest.match(l)
+                    if m:
+                        d = [ x for x in destinations if x["index"] == m.groupdict()["INDEX"]]
+                        if d:
+                            d = d[0]
+                            d["dstip"] = m.groupdict()["DSTIP"]
+                            d["dstport"] = m.groupdict()["DSTPORT"]
+                        continue
+            if destinations:
+                flow["destinations"] = destinations
+
+        return flow
+
+
+
